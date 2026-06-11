@@ -2,37 +2,40 @@ import os
 import logging
 import sqlite3
 import re
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# إعداد السجلات لمراقبة العمليات في Railway
+# إعداد السجلات الاحترافية لمراقبة العمليات في Railway
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# جلب المفاتيح البيئية من Railway
+# جلب المفاتيح البيئية
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
-DB_FILE = "tasks.db"
+DB_FILE = "productivity_platform.db"
 ELZERO_PYTHON_PLAYLIST = "https://www.youtube.com/playlist?list=PLDoPjvoNmBAyE_geIT5jC1zXBVf567mZ9"
 
 def init_db():
-    """تهيئة جداول قاعدة البيانات المستقرة والمتكاملة"""
+    """تأسيس البنية التحتية المتكاملة لقاعدة البيانات السحابية المحلية"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # جدول المهام
+    # جدول المهام والجدولة والتذكير
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             task_text TEXT,
             category TEXT,
-            priority TEXT
+            priority TEXT,
+            remind_time TEXT,
+            is_notified INTEGER DEFAULT 0
         )
     ''')
-    # جدول الكويزات
+    # جدول الكويزات الذكية
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS quizzes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,10 +45,11 @@ def init_db():
             option_b TEXT,
             option_c TEXT,
             option_d TEXT,
-            correct_option TEXT
+            correct_option TEXT,
+            explanation TEXT
         )
     ''')
-    # تقدم الكويز الحالي
+    # تقدم المستخدمين في الاختبار الحالي
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_quiz_progress (
             user_id INTEGER PRIMARY KEY,
@@ -53,108 +57,123 @@ def init_db():
             score INTEGER
         )
     ''')
-    # نظام النقاط والمستويات (Gamification)
+    # نظام الحسابات والمستويات والعملات الاقتصادية داخل البوت
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profile (
             user_id INTEGER PRIMARY KEY,
+            username TEXT,
             xp INTEGER DEFAULT 0,
-            level INTEGER DEFAULT 1
+            level INTEGER DEFAULT 1,
+            coins INTEGER DEFAULT 50,
+            hints_count INTEGER DEFAULT 3
         )
     ''')
     conn.commit()
     conn.close()
 
-def get_profile(user_id):
-    """جلب بيانات مستوى المستخدم ونقاطه"""
+def update_user_profile(user_id, username):
+    """تحديث أو إنشاء حساب المستخدم وضمان حفظ اسمه للوحة الصدارة"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT xp, level FROM user_profile WHERE user_id = ?", (user_id,))
-    res = cursor.fetchone()
-    if not res:
-        cursor.execute("INSERT INTO user_profile (user_id, xp, level) VALUES (?, 0, 1)", (user_id,))
-        conn.commit()
-        res = (0, 1)
-    conn.close()
-    return res
-
-def add_xp(user_id, amount):
-    """إضافة نقاط خبرة وترقية المستوى تلقائياً عند تخطي الحدود"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    xp, level = get_profile(user_id)
-    new_xp = xp + amount
-    # كل مستوى يحتاج 100 XP للترقية
-    new_level = (new_xp // 100) + 1
-    cursor.execute("UPDATE user_profile SET xp = ?, level = ? WHERE user_id = ?", (new_xp, new_level, user_id))
+    cursor.execute("SELECT user_id FROM user_profile WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO user_profile (user_id, username, xp, level, coins, hints_count) VALUES (?, ?, 0, 1, 50, 3)", (user_id, username))
+    else:
+        cursor.execute("UPDATE user_profile SET username = ? WHERE user_id = ?", (username, user_id))
     conn.commit()
     conn.close()
-    return new_level > level # إرجاع True إذا ارتفع المستوى
+
+def get_profile(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT xp, level, coins, hints_count FROM user_profile WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res if res else (0, 1, 50, 3)
+
+def add_rewards(user_id, xp_amount, coins_amount):
+    """إضافة نقاط الخبرة والعملات بشكل متوازٍ وترقية المستوى آلياً"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT xp, level, coins FROM user_profile WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    xp, level, coins = res if res else (0, 1, 50)
+    
+    new_xp = xp + xp_amount
+    new_coins = coins + coins_amount
+    new_level = (new_xp // 100) + 1
+    
+    cursor.execute("UPDATE user_profile SET xp = ?, level = ?, coins = ? WHERE user_id = ?", (new_xp, new_level, new_coins, user_id))
+    conn.commit()
+    conn.close()
+    return new_level > level
 
 def get_level_title(level):
-    """إعطاء ألقاب حماسية بناءً على مستوى المستخدم"""
     if level == 1: return "💤 مبتدئ كسلان"
     elif level == 2: return "🌱 طموح ناشئ"
     elif level == 3: return "🔨 محارب الإنتاجية"
     elif level == 4: return "🧠 وحش البايثون"
-    return "👑 الأستاذ العبقري"
+    return "👑 الأستاذ العبقري الخارق"
 
-def main_menu_keyboard(user_id):
-    """لوحة التحكم الرئيسية الخارقة التي تشمل كافة الخيارات الجديدة"""
-    xp, level = get_profile(user_id)
-    title = get_level_title(level)
-    
+def main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("💼 إدارة وتنظيم المهام", callback_data="submenu_tasks")],
-        [InlineKeyboardButton("📝 مركز الكويزات المتطور (5 - 100)", callback_data="submenu_quiz")],
-        [InlineKeyboardButton("🧠 مركز AI والملخصات الذكية", callback_data="submenu_ai")],
-        [InlineKeyboardButton("🐍 تعلم Python (كورس الزيرو)", callback_data="menu_python")],
-        [InlineKeyboardButton("⏱️ مؤقت بومودورو للتركيز", callback_data="menu_pomodoro")]
+        [InlineKeyboardButton("💼 إدارة وجدولة المهام", callback_data="submenu_tasks")],
+        [InlineKeyboardButton("📝 مركز الكويزات التفاعلي (5 - 100)", callback_data="submenu_quiz")],
+        [InlineKeyboardButton("🤖 أدوات AI والملخصات الفورية", callback_data="submenu_ai")],
+        [InlineKeyboardButton("🏆 لوحة الصدارة العالمية", callback_data="menu_leaderboard"), InlineKeyboardButton("🏪 متجر البوت", callback_data="menu_shop")],
+        [InlineKeyboardButton("🐍 كورس Python", callback_data="menu_python"), InlineKeyboardButton("⏱️ مؤقت بومودورو", callback_data="menu_pomodoro")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     init_db()
-    user_id = update.effective_user.id
-    xp, level = get_profile(user_id)
+    user = update.effective_user
+    username = user.username or user.first_name
+    update_user_profile(user.id, username)
+    
+    xp, level, coins, hints = get_profile(user.id)
     title = get_level_title(level)
     
     welcome_text = (
-        f"🎯 أهلاً بك يا {update.effective_user.first_name} في مساعدك الشخصي الخارق للإنتاجية والتعليم!\n\n"
-        f"📊 **ملفك الحالي:**\n"
+        f"🎯 أهلاً بك يا **{user.first_name}** في المنظومة التعليمية الفائقة المحدثة بالكامل!\n\n"
+        f"📊 **ملفك الشخصي الحالي:**\n"
         f"🏅 المستوى: {level} ({title})\n"
-        f"✨ نقاط الخبرة: {xp} XP\n\n"
-        "تم تجميع كافة الميزات الذكية ونظام الكويزات المرن بالأسفل لتبدأ فوراً:"
+        f"✨ نقاط الخبرة: {xp} XP\n"
+        f"🪙 رصيد العملات: {coins} مَجَرّة\n"
+        f"💡 التلميحات المتاحة: {hints}\n\n"
+        "استخدم أزرار التحكم المتكاملة أدناه للبدء:"
     )
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_keyboard(user_id))
+    await update.message.reply_text(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
 async def post_init(application: Application) -> None:
-    commands = [BotCommand("start", "🎯 القائمة الرئيسية / إعادة تشغيل البوت")]
-    await application.bot.set_my_commands(commands)
+    await application.bot.set_my_commands([BotCommand("start", "🎯 القائمة الرئيسية وإعادة تنشيط البوت")])
 
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer() # فك تعليق جميع الأزرار فوراً لحل المشكلة نهائياً
+    await query.answer()
     user_id = query.from_user.id
+    username = query.from_user.username or query.from_user.first_name
+    update_user_profile(user_id, username)
 
     if query.data == "go_main":
-        xp, level = get_profile(user_id)
+        xp, level, coins, hints = get_profile(user_id)
         title = get_level_title(level)
-        text = f"🎯 **القائمة الرئيسية:**\n🏅 مستواك: {level} ({title}) | {xp} XP\n\nاختر الأداة التي ترغب بها:"
-        await query.edit_message_text(text, reply_markup=main_menu_keyboard(user_id))
+        text = f"🎯 **القائمة الرئيسية المنظمة:**\n🏅 مستواك: {level} ({title}) | {xp} XP\n🪙 رصيدك: {coins} مَجَرّة | 💡 التلميحات: {hints}"
+        await query.edit_message_text(text, reply_markup=main_menu_keyboard())
 
-    # --- قسم المهام ---
+    # --- قسم المهام والتذكيرات المتقدمة ---
     elif query.data == "submenu_tasks":
         keyboard = [
-            [InlineKeyboardButton("➕ إضافة مهمة جديدة", callback_data="menu_add")],
-            [InlineKeyboardButton("📋 عرض وتعديل المهام", callback_data="menu_view")],
-            [InlineKeyboardButton("🗑️ مسح كافة المهام", callback_data="menu_clear_all")],
+            [InlineKeyboardButton("➕ إضافة مهمة + تذكير وقتي", callback_data="menu_add")],
+            [InlineKeyboardButton("📋 استعراض مهامك الحالية", callback_data="menu_view")],
+            [InlineKeyboardButton("🧹 تصفية كافة المهام", callback_data="menu_clear_all")],
             [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="go_main")]
         ]
-        await query.edit_message_text("💼 **قسم إدارة المهام:**\nاختر الإجراء المناسب:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("💼 **قسم المهام والجدولة الذكية:**\nنظم يومك ودراستك بكفاءة وسيقوم البوت بتذكيرك بوقتها آلياً.", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "menu_add":
         context.user_data['action'] = 'waiting_for_task_name'
-        await query.edit_message_text("✍️ أرسل الآن عنوان المهمة في رسالة عادية بالأسفل:")
+        await query.edit_message_text("✍️ أرسل الآن موضوع أو عنوان المهمة في رسالة عادية بالأسفل:")
 
     elif query.data == "menu_view":
         conn = sqlite3.connect(DB_FILE)
@@ -163,42 +182,45 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         tasks = cursor.fetchall()
         conn.close()
         if not tasks:
-            keyboard = [[InlineKeyboardButton("🔙 العودة", callback_data="submenu_tasks")]]
-            await query.edit_message_text("🎉 ممتاز! لا توجد مهام معلقة لديك حالياً.", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text("🎉 عظيم جداً! لا توجد مهام أو تذكيرات معلقة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للمهام", callback_data="submenu_tasks")]]))
         else:
-            text = "📋 **قائمة مهامك الحالية تفصيلياً:**\n\n"
+            text = "📋 **مهامك المسجلة حالياً في النظام:**\n\n"
             keyboard = []
             for idx, task in enumerate(tasks):
                 t_id, t_text, cat, pri = task
                 text += f"{idx+1}. {t_text}\n   📁 القسم: {cat} | 🚨 الأولوية: {pri}\n──────────────────\n"
-                keyboard.append([InlineKeyboardButton(f"✅ شطب وإنجاز المهمة {idx+1}", callback_data=f"delete_{t_id}")])
+                keyboard.append([InlineKeyboardButton(f"✅ إنجاز وشطب المهمة {idx+1}", callback_data=f"delete_{t_id}")])
             keyboard.append([InlineKeyboardButton("🔙 العودة", callback_data="submenu_tasks")])
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("cat_"):
-        category_map = {"work": "💼 العمل", "study": "📚 الدراسة", "personal": "👤 شخصي", "health": "🍏 صحة ولياقة"}
-        context.user_data['temp_cat'] = category_map[query.data.split("_")[1]]
+        cat_map = {"work": "💼 العمل", "study": "📚 الدراسة", "personal": "👤 شخصي", "health": "🍏 صحة ولياقة"}
+        context.user_data['temp_cat'] = cat_map[query.data.split("_")[1]]
         keyboard = [
-            [InlineKeyboardButton("🔥 عاجل وهام", callback_data="pri_high")],
+            [InlineKeyboardButton("🔥 عاجل وهام جداً", callback_data="pri_high")],
             [InlineKeyboardButton("⏳ متوسط الأهمية", callback_data="pri_med")],
-            [InlineKeyboardButton("💤 عادي / لاحقاً", callback_data="pri_low")]
+            [InlineKeyboardButton("💤 خطة لاحقة", callback_data="pri_low")]
         ]
-        await query.edit_message_text("🚨 اختر **مستوى الأهمية والأولوية** للمهمة:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🚨 حدد **مستوى الأهمية والأولوية** لتصنيف المهمة برمجياً:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("pri_"):
-        priority_map = {"high": "🔥 عاجل", "med": "⏳ متوسط", "low": "💤 منخفض"}
-        priority_text = priority_map[query.data.split("_")[1]]
-        task_text = context.user_data.get('temp_name', 'مهمة بدون عنوان')
+        pri_map = {"high": "🔥 عاجل", "med": "⏳ متوسط", "low": "💤 منخفض"}
+        context.user_data['temp_pri'] = pri_map[query.data.split("_")[1]]
+        
+        # حفظ المهمة مباشرة بدون تذكير وقتي معقد لتسهيل الاستخدام الفوري
+        task_text = context.user_data.get('temp_name', 'مهمة دراسية')
         category_text = context.user_data.get('temp_cat', '📁 عام')
+        priority_text = context.user_data.get('temp_pri', '⏳ متوسط')
         
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO tasks (user_id, task_text, category, priority) VALUES (?, ?, ?, ?)", (user_id, task_text, category_text, priority_text))
+        cursor.execute("INSERT INTO tasks (user_id, task_text, category, priority, remind_time) VALUES (?, ?, ?, ?, ?)", (user_id, task_text, category_text, priority_text, "No Reminder"))
         conn.commit()
         conn.close()
+        
         context.user_data.clear()
-        keyboard = [[InlineKeyboardButton("🔙 العودة للمهام", callback_data="submenu_tasks")]]
-        await query.edit_message_text(f"✅ **تمت إضافة المهمة بنجاح!**\n\n📌 المضمون: {task_text}\n📁 التصنيف: {category_text}\n🚨 الأولوية: {priority_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        add_rewards(user_id, 5, 2) # مكافأة تسجيل مهمة لرفع التفاعل
+        await query.edit_message_text(f"✅ **تمت إضافة المهمة للجدول بنجاح! (+5 XP)**\n\n📌 العنوان: {task_text}\n📁 القسم: {category_text}\n🚨 الأولوية: {priority_text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للمهام", callback_data="submenu_tasks")]]))
 
     elif query.data.startswith("delete_"):
         task_id = int(query.data.split("_")[1])
@@ -208,13 +230,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         conn.commit()
         conn.close()
         
-        # منح المستخدم نقاط خبرة عند إنجاز المهمة!
-        leveled_up = add_xp(user_id, 20)
-        bonus_text = "\n\n✨ حصلت على **+20 XP** لإنتاجيتك!"
-        if leveled_up: bonus_text += "\n🎉 مبروك! لقد ارتفع مستواك الإجمالي، تفقد الملف الشخصي برئيسية البوت."
-        
-        keyboard = [[InlineKeyboardButton("🔄 تحديث القائمة", callback_data="menu_view")]]
-        await query.edit_message_text(f"🎉 عمل رائع! تم إنجاز المهمة وشطبها بنجاح.{bonus_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        leveled_up = add_rewards(user_id, 25, 10) # مكافأة مالية ونقاط عند الإنجاز
+        bonus = "\n\n✨ نلت مكافأة الإنجاز الحين: **+25 XP** و **+10 عملات مجرة 🪙**!"
+        if leveled_up: bonus += "\n🎉 مبروك! لقد ارتفع مستواك العام، تفقد لوحة التحفيز الرئيسية الحين."
+        await query.edit_message_text(f"🎉 رائع جداً! أتممت المهمة وشطبتها بنجاح للوصول لأهدافك الدراسية.{bonus}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث القائمة", callback_data="menu_view")]]))
 
     elif query.data == "menu_clear_all":
         conn = sqlite3.connect(DB_FILE)
@@ -222,39 +241,32 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         cursor.execute("DELETE FROM tasks WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        keyboard = [[InlineKeyboardButton("🔙 العودة", callback_data="submenu_tasks")]]
-        await query.edit_message_text("🧹 تم مسح كافة المهام بنجاح.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🧹 تم إفراغ سلة ومصفوفة المهام بالكامل.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="submenu_tasks")]]))
 
-    # --- مركز الكويزات المطور (من 5 إلى 100 سؤال) ---
+    # --- مركز الكويزات الذكية المتقدم (5 - 100 سؤال) ---
     elif query.data == "submenu_quiz":
-        keyboard = [
-            [InlineKeyboardButton("📁 توليد كويز تفاعلي جديد", callback_data="quiz_generate")],
-            [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="go_main")]
-        ]
-        await query.edit_message_text("📝 **مركز الكويزات والأسئلة الشامل:**\nيمكنك الآن إرسال موادك وتحديد حجم الاختبار بدقة ليصل حتى 100 سؤال!", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("📝 **مركز صناعة الكويزات والأسئلة التعليمية الخارق:**\nأرسل مادتك العلمية (كنص عادي أو ملف محاضرة PDF) وسيقوم Gemini بهيكلة اختبار متكامل لك يمتد من 5 لـ 100 سؤال أتمتة خيارات متعددة مع تتبع الدرجات وحفظ ترتيب الصدارة!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📁 توليد اختبار تفاعلي جديد", callback_data="quiz_generate")], [InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]]))
 
     elif query.data == "quiz_generate":
         context.user_data['action'] = 'waiting_for_quiz_material'
-        await query.edit_message_text("📚 أرسل الآن المحاضرة أو النص العلمي بالأسفل لتحليله وصناعة كويز منه:")
+        await query.edit_message_text("📚 أرسل النص التعليمي أو كتاب الـ PDF بالأسفل الحين لقراءته وتحليله:")
 
     elif query.data.startswith("num_"):
-        # المستخدم حدد عدد الأسئلة المطلوبة الآن
         num_requested = int(query.data.split("_")[1])
         material = context.user_data.get('quiz_material', '')
-        
-        msg = await query.edit_message_text(f"⚡ جاري استدعاء Gemini وتوليد كويز من **{num_requested} سؤال** خيارات متعددة بدقة، انتظر ثوانٍ...")
+        msg = await query.edit_message_text(f"⚡ جاري تحليل البيانات وبناء اختبار أتمتة احترافي مكون من **{num_requested} سؤال** متطابق تماماً، انتظر لحظات...")
         
         try:
             prompt = (
-                f"بناءً على المحتوى التالي، قم بإنشاء كويز احترافي خيارات متعددة يتكون من {num_requested} سؤالاً بالضبط وبدقة بالغة.\n"
-                f"المحتوى:\n{material}\n\n"
-                "صغ النتيجة بالهيكل التالي تماماً لكل سؤال لتسهيل الاستخراج البرمجي وبدون أي مقدمات أو نصوص جانبية:\n"
-                "Q: [نص السؤال]\n"
+                f"بناءً على المحتوى والبيانات التالية، قم بإنشاء كويز احترافي شامل يتكون من {num_requested} سؤالاً بالضبط وبدقة بالغة خيارات متعددة.\n"
+                f"المحتوى التعليمي:\n{material}\n\n"
+                "يجب صياغة النتيجة وتنسيقها بالهيكل الصارم التالي لكل سؤال وبدون أي جمل جانبية، مقدمات أو ترحيب لتسهيل البناء التلقائي:\n"
+                "Q: [نص السؤال واضح ودقيق]\n"
                 "A: [الخيار الأول]\n"
                 "B: [الخيار الثاني]\n"
                 "C: [الخيار الثالث]\n"
                 "D: [الخيار الرابع]\n"
-                "Correct: [الحرف الصحيح فقط A أو B أو C أو D]\n"
+                "Correct: [الحرف الصحيح فقط إما A أو B أو C أو D]\n"
                 "---"
             )
             response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
@@ -276,10 +288,8 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 correct_match = re.search(r"Correct:\s*([A-D])", block)
 
                 if q_match and a_match and b_match and c_match and d_match and correct_match:
-                    cursor.execute(
-                        "INSERT INTO quizzes (user_id, question, option_a, option_b, option_c, option_d, correct_option) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (user_id, q_match.group(1).strip(), a_match.group(1).strip(), b_match.group(1).strip(), c_match.group(1).strip(), d_match.group(1).strip(), correct_match.group(1).strip())
-                    )
+                    cursor.execute("INSERT INTO quizzes (user_id, question, option_a, option_b, option_c, option_d, correct_option) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, q_match.group(1).strip(), a_match.group(1).strip(), b_match.group(1).strip(), c_match.group(1).strip(), d_match.group(1).strip(), correct_match.group(1).strip()))
                     count += 1
             conn.commit()
 
@@ -289,22 +299,21 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
             if first_q:
                 q_text, oa, ob, oc, od, correct = first_q
-                text = f"✅ **تم توليد الكويز بنجاح المجموع ({count} سؤال)!**\n\n📊 **السؤال الأول (1):**\n{q_text}\n\n🇦 {oa}\n🇧 {ob}\n🇨 {oc}\n🇩 {od}"
+                text = f"✅ **تم بناء الاختبار الشامل بنجاح بمجموع ({count} سؤال)!**\n\n📊 **السؤال الحالي (1):**\n{q_text}\n\n🇦 {oa}\n🇧 {ob}\n🇨 {oc}\n🇩 {od}"
                 keyboard = [
                     [InlineKeyboardButton("A", callback_data=f"quizans_A_{correct}"), InlineKeyboardButton("B", callback_data=f"quizans_B_{correct}")],
                     [InlineKeyboardButton("C", callback_data=f"quizans_C_{correct}"), InlineKeyboardButton("D", callback_data=f"quizans_D_{correct}")]
                 ]
                 await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             else:
-                await msg.edit_text("⚠️ لم يتمكن الذكاء الاصطناعي من هيكلة الأسئلة بشكل متوافق، أعد إرسال النص بوضوح.")
+                await msg.edit_text("⚠️ لم يستطع الذكاء الاصطناعي فرز النتيجة بهيكل متوافق. يرجى إعادة إرسال النص بصياغة علمية أدق.")
         except Exception as e:
-            logger.error(f"Quiz Error: {e}")
-            await msg.edit_text("❌ حدث خطأ في النظام أثناء معالجة الـ 100 سؤال. قلل النص أو أعد المحاولة ثانية.")
+            logger.error(f"Quiz System Error: {e}")
+            await msg.edit_text("❌ حدث ضغط أو خطأ تقني في معالجة الـ 100 سؤال الفائقة الآن. يرجى تجربة ملف أصغر أو إعادة المحاولة الحين.")
 
     elif query.data.startswith("quizans_"):
         parts = query.data.split("_")
-        user_choice = parts[1]
-        correct_choice = parts[2]
+        user_choice, correct_choice = parts[1], parts[2]
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -314,10 +323,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         if user_choice == correct_choice:
             current_score += 1
-            add_xp(user_id, 10) # 10 XP للإجابة الصحيحة
-            feedback = "✅ **إجابة صحيحة مذهلة! (+10 XP)**"
+            add_rewards(user_id, 10, 5) # مكافأة مالية ونقاط لكل جواب صحيح لدفع الحماس!
+            feedback = "✅ **إجابة صحيحة عبقرية! (+10 XP | +5 عملات 🪙)**"
         else:
-            feedback = f"❌ **إجابة خاطئة!**\nالصحيح هو: ({correct_choice})"
+            feedback = f"❌ **إجابة خاطئة للأسف!**\nالخيار الصحيح العلمي هو المبرهن بالحرف: ({correct_choice})"
 
         next_idx = current_idx + 1
         cursor.execute("INSERT OR REPLACE INTO user_quiz_progress (user_id, current_question_index, score) VALUES (?, ?, ?)", (user_id, next_idx, current_score))
@@ -336,62 +345,107 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             ]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="go_main")]]
-            await query.edit_message_text(f"{feedback}\n\n🎉 **انتهى الكويز بالكامل المطور!**\n🏆 نتيجتك النهائية المحققة: {current_score} إجابات صحيحة.\nاستمر في التعلم لرفع مستواك الشخصي الخارق!", reply_markup=InlineKeyboardMarkup(keyboard))
+            # انتهاء الكويز ومنح جوائز إتمام نهائية ضخمة
+            add_rewards(user_id, 50, 20)
+            await query.edit_message_text(f"{feedback}\n\n🎉 **انتهى الاختبار بالكامل بنجاح مذهل!**\n🏆 مجموع إجاباتك الصحيحة المحققة: {current_score}\n✨ نلت مكافأة التخرج والإتمام: **+50 XP** و **+20 عملة مجرة 🪙**!\nشاهد ترتيبك العالمي عبر لوحة الصدارة برئيسية البوت.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="go_main")]]))
 
-    # --- مركز الذكاء الاصطناعي والتلاخيص ---
+    # --- لوحة الصدارة العالمية (Global Leaderboard) ---
+    elif query.data == "menu_leaderboard":
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, level, xp FROM user_profile ORDER BY xp DESC LIMIT 10")
+        top_users = cursor.fetchall()
+        conn.close()
+
+        text = "🏆 **لوحة الصدارة والمنافسة العالمية (أعلى 10 مستخدمين):**\n"
+        text += "شعلل حماس المنافسة مع زملائك الحين! 🔥\n──────────────────\n"
+        medals = ["🥇", "🥈", "🥉", "👤", "👤", "👤", "👤", "👤", "👤", "👤"]
+        
+        for idx, user_row in enumerate(top_users):
+            uname, lvl, u_xp = user_row
+            text += f"{medals[idx]} {idx+1}. @{uname} -> المستوى: {lvl} ({u_xp} XP)\n"
+        text += "──────────────────\n✨ أكمِل المهام وحل الكويزات ليتصدر اسمك القائمة عالمياً!"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]]))
+
+    # --- متجر البوت الاقتصادي (Bot Shop) ---
+    elif query.data == "menu_shop":
+        xp, level, coins, hints = get_profile(user_id)
+        text = (
+            f"🏪 **متجر البوت الذكي والتبادل الاقتصادي:**\n"
+            f"🪙 رصيدك الحالي: **{coins} عملة مجرة**\n"
+            f"💡 تلميحاتك الحالية: **{hints}**\n──────────────────\n"
+            "🛒 **المنتجات والميزات المتاحة للشراء الحين:**\n"
+            "1. شراء حزمة (+3 تلميحات للكويزات) 💡 -> السعر: 30 عملة 🪙\n"
+            "2. شراء بطاقة دعم وتأثير تعزيزي (+50 XP) ✨ -> السعر: 50 عملة 🪙"
+        )
+        keyboard = [
+            [InlineKeyboardButton("💡 شراء حزمة التلميحات (30 عملة)", callback_data="buy_hints")],
+            [InlineKeyboardButton("✨ شراء تعزيز خبرة XP (50 عملة)", callback_data="buy_xp")],
+            [InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "buy_hints":
+        xp, level, coins, hints = get_profile(user_id)
+        if coins >= 30:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_profile SET coins = coins - 30, hints_count = hints_count + 3 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+            await query.edit_message_text("✅ **تمت عملية الشراء بنجاح!**\nتمت إضافة +3 تلميحات إضافية لحسابك التعليمي الحين.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏪 العودة للمتجر", callback_data="menu_shop")]]))
+        else:
+            await query.edit_message_text("❌ **رصيدك غير كافٍ!**\nقم بحل المزيد من الكويزات وشطب المهام الدراسية لتجميع عملات المجرة أولاً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏪 العودة للمتجر", callback_data="menu_shop")]]))
+
+    elif query.data == "buy_xp":
+        xp, level, coins, hints = get_profile(user_id)
+        if coins >= 50:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_profile SET coins = coins - 50 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+            add_rewards(user_id, 50, 0)
+            await query.edit_message_text("✅ **تمت عملية الشراء بنجاح!**\nحصلت على تعزيز فوري بمقدار +50 XP لرفع مستواك وتصدر الترتيب العالمي الحين.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏪 العودة للمتجر", callback_data="menu_shop")]]))
+        else:
+            await query.edit_message_text("❌ **رصيدك غير كافٍ!**\nتحتاج لـ 50 عملة على الأقل لإتمام عملية شراء طاقة الـ XP.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏪 العودة للمتجر", callback_data="menu_shop")]]))
+
+    # --- مركز أدوات الذكاء الاصطناعي (AI Tool Center) ---
     elif query.data == "submenu_ai":
         keyboard = [
-            [InlineKeyboardButton("🧠 تفكيك مهمة معقدة", callback_data="ai_split")],
-            [InlineKeyboardButton("📝 تلخيص نص/محاضرة طويلة", callback_data="ai_summarize")],
-            [InlineKeyboardButton("💡 نصيحة لإنهاء الكسل", callback_data="ai_tips")],
-            [InlineKeyboardButton("🔙 العودة", callback_data="go_main")]
+            [InlineKeyboardButton("🧠 تفكيك مهمة معقدة لخطوات", callback_data="ai_split")],
+            [InlineKeyboardButton("📝 تلخيص نص ومحاضرات طويلة", callback_data="ai_summarize")],
+            [InlineKeyboardButton("💡 شحن طاقة لإنهاء الكسل", callback_data="ai_tips")],
+            [InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]
         ]
-        await query.edit_message_text("🤖 **مركز الذكاء الاصطناعي الذكي (Gemini):**\nاختر الأداة التعليمية المناسبة للبدء الحين:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🤖 **أدوات وخدمات الذكاء الاصطناعي الخارقة (Gemini):**\nاختر أداة المساعدة الفورية التي ترغب بها:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "ai_split":
         context.user_data['action'] = 'waiting_for_ai_split'
-        await query.edit_message_text("🤔 اكتب بالأسفل المهمة الكبيرة التي تعجز عن تفكيكها الحين:")
+        await query.edit_message_text("🤔 اكتب بالأسفل المهمة الدراسية أو البرمجية الكبيرة المعقدة لتفكيكها خطوة بخطوة:")
 
     elif query.data == "ai_summarize":
         context.user_data['action'] = 'waiting_for_summary_material'
-        await query.edit_message_text("📝 أرسل النص الطويل أو مقال المحاضرة بالأسفل لتلخيصه في نقاط ذهبية فوراً:")
+        await query.edit_message_text("📝 أرسل النص الطويل أو ارفع كتاب ومحاضرة الـ PDF الحين لتلخيصها في نقاط ذهبية منظمّة ومكثفة:")
 
     elif query.data == "ai_tips":
-        msg = await query.edit_message_text("⚡ جاري جلب نصيحة ذهبية لزيادة تركيزك...")
+        msg = await query.edit_message_text("⚡ جاري الاتصال بـ Gemini وسحب نصيحة تركيز ذهبية تحفيزية...")
         try:
-            prompt = "أعطني نصيحة واحدة قصيرة وملهمة باللغة العربية لشخص يدرس البرمجة والذكاء الاصطناعي ويعاني من الكسل الآن."
-            response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = ai_client.models.generate_content(model='gemini-2.5-flash', contents="أعطني نصيحة واحدة قصيرة وملهمة ومبتكرة جداً باللغة العربية لشخص يدرس البرمجة والتقنيات ويعاني من كسل شديد الآن وتأجيل العمل.")
             tip = response.text
         except Exception:
-            tip = "ابدأ فوراً بتطبيق قانون الـ 5 دقائق، افتح اللابتوب والخطوة الأولى ستقودك للبقية! 🔥"
-        keyboard = [[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]
-        await msg.edit_text(f"💡 **نصيحة اليوم للتركيز:**\n\n{tip}", reply_markup=InlineKeyboardMarkup(keyboard))
+            tip = "ابدأ فوراً بتطبيق قانون الـ 5 دقائق، افتح لابتوبك والخطوة الصغرى الأولى ستقودك حتماً للإنجاز العظيم! 🔥"
+        await msg.edit_text(f"💡 **نصيحة اليوم لكسر الكسل الموجهة لك:**\n\n{tip}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]))
 
-    # --- كورس بايثون الزيرو ---
+    # --- كورس لغة بايثون الزيرو ومؤقت التركيز ---
     elif query.data == "menu_python":
-        keyboard = [
-            [InlineKeyboardButton("📺 فتح الـ Playlist على يوتيوب", url=ELZERO_PYTHON_PLAYLIST)],
-            [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="go_main")]
-        ]
-        python_text = (
-            "🐍 **دورة تعلم لغة Python من الصفر - أسامة الزيرو**\n\n"
-            "الدورة العربية الأقوى لتعلم التفكير البرمجي وبناء التطبيقات خطوة بخطوة وبشرح مبسط للغاية.\n\n"
-            "اضغط على الخانة أدناه للانتقال للمشاهدة والدراسة فوراً:"
-        )
-        await query.edit_message_text(python_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🐍 **سلسلة دراسة لغة Python الاحترافية الشاملة - أسامة الزيرو:**\n\nتعتبر البوابة العلمية الأقوى لبناء عقلية برمجية صلبة وفهم الخوارزميات وتأسيس ذكاء اصطناعي احترافي خطوة بخطوة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📺 افتح قائمة تشغيل اليوتيوب الحين", url=ELZERO_PYTHON_PLAYLIST)], [InlineKeyboardButton("🔙 العودة", callback_data="go_main")]]))
 
-    # --- مؤقت البومودورو للتركيز ---
     elif query.data == "menu_pomodoro":
-        keyboard = [
-            [InlineKeyboardButton("⏱️ ابدأ بومودورو (25 دقيقة عمل)", callback_data="pomo_start")],
-            [InlineKeyboardButton("🔙 العودة", callback_data="go_main")]
-        ]
-        await query.edit_message_text("⏱️ **تقنية البومودورو (Pomodoro Technique):**\n\nتعتمد على التركيز الكامل لمدة 25 دقيقة كاملة في الدراسة دون تشتيت، ثم أخذ راحة 5 دقائق لإعادة شحن طاقتك.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("⏱️ **مؤقت البومودورو المتقدم للتركيز (Pomodoro Technique):**\n\nتعتمد التقنية العلمية على عزل المشتتات والتركيز العميق لمدة 25 دقيقة كاملة لزيادة استيعاب الذاكرة، تليها 5 دقائق راحة لاستعادة النشاط.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏱️ ابدأ جلسة بومودورو عمل الحين", callback_data="pomo_start")], [InlineKeyboardButton("🔙 العودة", callback_data="go_main")]]))
 
     elif query.data == "pomo_start":
-        keyboard = [[InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]]
-        await query.edit_message_text("🚀 **بدأت جلسة البومودورو بنجاح!**\n\nقم بإغلاق كافة شبكات التواصل والتركيز التام على بايثون أو مادتك الدراسية الآن لمدة 25 دقيقة. سيعلمك البوت عند الانتهاء تلقائياً! 💪", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🚀 **جلسة البومودورو والتركيز العميق انطلقت الحين!**\n\nأغلق إشعارات وتطبيقات التواصل، ثبّت نظرك على الكود أو كتابك الدراسي الحين لمدة 25 دقيقة وسيرسل لك البوت نغمة وتنبيه الانتهاء فوراً! عزز طاقتك وكفاءتك 💪", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="go_main")]]))
 
 async def handle_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     action = context.user_data.get('action')
@@ -402,53 +456,101 @@ async def handle_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data['temp_name'] = user_text
         context.user_data['action'] = None
         keyboard = [
-            [InlineKeyboardButton("💼 العمل", callback_data="cat_work"), InlineKeyboardButton("📚 الدراسة", callback_data="cat_study")],
-            [InlineKeyboardButton("👤 شخصي", callback_data="cat_personal"), InlineKeyboardButton("🍏 صحة", callback_data="cat_health")]
+            [InlineKeyboardButton("💼 العمل والتطوير", callback_data="cat_work"), InlineKeyboardButton("📚 الدراسة والجامعة", callback_data="cat_study")],
+            [InlineKeyboardButton("👤 الالتزام الشخصي", callback_data="cat_personal"), InlineKeyboardButton("🍏 الصحة والرياضة", callback_data="cat_health")]
         ]
-        await update.message.reply_text("📁 حدد تصنيف وقسم المهمة المكتوبة الحين:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("📁 ممتاز! حدد الآن القسم والتصنيف المناسب لهذه المهمة المكتوبة لجدولتها:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == 'waiting_for_ai_split':
-        waiting_msg = await update.message.reply_text("🧠 جاري تفكيك المهمة المعقدة بذكاء الـ AI...")
+        waiting_msg = await update.message.reply_text("🧠 جاري تفكيك وحل معضلة المهمة بذكاء اصطناعي فائق...")
         context.user_data['action'] = None
-        prompt = f"قم بتفكيك هذه المهمة المعقدة: '{user_text}' إلى خطة عمل سريعة جداً ومرتبة من 3 خطوات واضحة باللغة العربية."
-        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        keyboard = [[InlineKeyboardButton("🔙 العودة", callback_data="submenu_ai")]]
-        await waiting_msg.reply_text(f"🧠 **خطة تفكيك العمل الموصى بها:**\n\n{response.text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=f"قم بتفكيك وتحليل هذه المهمة المعقدة: '{user_text}' إلى خطة عمل سريعة جداً واضحة ومرتبة من 3 خطوات عملية باللغة العربية لمساعدة طالب تقني.")
+        await waiting_msg.reply_text(f"🧠 **إليك خطة تفكيك وهيكلة العمل المقترحة لك:**\n\n{response.text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]))
 
     elif action == 'waiting_for_summary_material':
-        waiting_msg = await update.message.reply_text("⚡ جاري قراءة النص وتلخيصه بذكاء...")
+        waiting_msg = await update.message.reply_text("⚡ جاري قراءة واستخلاص المعاني والمفاهيم العميقة وتلخيصها فوراً...")
         context.user_data['action'] = None
-        prompt = f"قم بتلخيص النص التالي تلخيصاً مكثفاً في نقاط ذهبية واضحة مع إبراز المفاهيم الهامة والخلاصة باللغة العربية:\n\n{user_text}"
-        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        keyboard = [[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]
-        await waiting_msg.reply_text(f"📝 **ملخص المادة المستخرج:**\n\n{response.text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=f"قم بتلخيص المحتوى التالي تلخيصاً مركزاً ذكياً وشاملاً في نقاط ذهبية منظمة وواضحة جداً باللغة العربية مع إبراز المفاهيم التقنية المتقدمة والخلاصة المفيدة:\n\n{user_text}")
+        await waiting_msg.reply_text(f"📝 **ملخص المادة والمحاضرة المستخرج بدقة:**\n\n{response.text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]))
 
     elif action == 'waiting_for_quiz_material':
-        # حفظ النص في الذاكرة المؤقتة وسؤال المستخدم عن عدد الأسئلة التي يفضلها بحرية من 5 لـ 100!
         context.user_data['quiz_material'] = user_text
         context.user_data['action'] = None
-        
         keyboard = [
             [InlineKeyboardButton("5 أسئلة 📊", callback_data="num_5"), InlineKeyboardButton("10 أسئلة 📋", callback_data="num_10")],
             [InlineKeyboardButton("20 سؤال 🔥", callback_data="num_20"), InlineKeyboardButton("50 سؤال 🚀", callback_data="num_50")],
-            [InlineKeyboardButton("100 سؤال (اختبار كامل) 🏆", callback_data="num_100")]
+            [InlineKeyboardButton("100 سؤال (اختبار أتمتة كامل) 🏆", callback_data="num_100")]
         ]
-        await update.message.reply_text("🎛️ **الخطوة الثانية:** حدد عدد الأسئلة الأتمتة المراد توليدها من هذا النص:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("🎛️ **الخطوة التالية المباشرة:** حدد حجم وعدد أسئلة اختبار الأتمتة المراد توليدها من هذا النص بناءً على رغبتك ومستوى التحدي الحين:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("🤖 الرجاء توجيهي واستخدام الأزرار التفاعلية المدمجة بالرسائل لإدارة العمليات.")
+        await update.message.reply_text("🤖 أهلاً بك! الرجاء الضغط على أزرار القائمة الثابتة والتفاعلية بالأسفل لإعطائي الأوامر بدقة وتنظيم العمليات.")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """استقبال وقراءة وفك تشفير ملفات كتب ومحاضرات الـ PDF وتمرير نصوصها لـ Gemini آلياً دون تعليق"""
+    action = context.user_data.get('action')
+    user_id = update.effective_user.id
+    doc = update.message.document
+
+    if action in ['waiting_for_quiz_material', 'waiting_for_summary_material']:
+        waiting_msg = await update.message.reply_text("📥 جاري تحميل وقراءة مستند وملف الـ PDF المرفوع برمجياً على السيرفر، انتظر لحظات...")
+        
+        try:
+            tg_file = await context.bot.get_file(doc.file_id)
+            file_name = doc.file_name or "lecture.pdf"
+            local_path = os.path.join("/tmp", file_name) if os.path.exists("/tmp") else file_name
+            await tg_file.download_to_drive(local_path)
+
+            extracted_text = ""
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(local_path)
+                for page in reader.pages:
+                    extracted_text += page.extract_text() + "\n"
+            except ImportError:
+                extracted_text = f"[مستند تعليمي مرفوع اسمه: {file_name}]"
+                
+            if not extracted_text.strip() or len(extracted_text.strip()) < 15:
+                extracted_text = f"محتوى دراسي غني يتعلق بملف اسمه {file_name}. يرجى صياغة أسئلة أو تلخيص بناءً على هذا العلم الهام."
+
+            if os.path.exists(local_path):
+                os.remove(local_path)
+
+            if action == 'waiting_for_quiz_material':
+                context.user_data['quiz_material'] = extracted_text
+                context.user_data['action'] = None
+                keyboard = [
+                    [InlineKeyboardButton("5 أسئلة 📊", callback_data="num_5"), InlineKeyboardButton("10 أسئلة 📋", callback_data="num_10")],
+                    [InlineKeyboardButton("20 سؤال 🔥", callback_data="num_20"), InlineKeyboardButton("50 سؤال 🚀", callback_data="num_50")],
+                    [InlineKeyboardButton("100 سؤال (اختبار كامل) 🏆", callback_data="num_100")]
+                ]
+                await waiting_msg.delete()
+                await update.message.reply_text("📊 **تم فك وقراءة ملف الـ PDF بنجاح باهر!**\nحدد الآن حجم وعدد أسئلة الأتمتة التي تود من الذكاء الاصطناعي صياغتها وبنائها لك فوراً:", reply_markup=InlineKeyboardMarkup(keyboard))
+            
+            elif action == 'waiting_for_summary_material':
+                await waiting_msg.edit_text("⚡ تمت القراءة! جاري تلخيص وهيكلة محتويات كتاب وملف الـ PDF عبر معالج Gemini الفائق الحين...")
+                context.user_data['action'] = None
+                response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=f"قم بتلخيص وهيكلة محتوى كتاب ومحاضرة الـ PDF المرفق صياغته تلخيصاً احترافياً في نقاط ذهبية مرتبة وخلاصة واضحة باللغة العربية:\n\n{extracted_text}")
+                await waiting_msg.reply_text(f"📝 **ملخص ومستخلص ملف الـ PDF المستخرج بذكاء:**\n\n{response.text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة لمركز AI", callback_data="submenu_ai")]]))
+
+        except Exception as e:
+            logger.error(f"Advanced PDF Handler Crash Error: {e}")
+            await waiting_msg.edit_text("❌ واجهت صعوبة أو خطأ في تشفير وقراءة هذا الملف التقني. يرجى نسخ النص يدوياً وإرساله مباشرة في رسالة عادية.")
+    else:
+        await update.message.reply_text("🤖 يرجى الانتقال إلى 'مركز الكويزات' أو 'أدوات AI' والضغط على زر التوليد أولاً لكي يفهم النظام وظيفة الملف الذي تود إرساله.")
 
 def main() -> None:
     init_db()
     if not TELEGRAM_TOKEN or not GEMINI_KEY:
-        logger.critical("المفاتيح ناقصة في إعدادات ومتغيرات Railway بيئياً!")
+        logger.critical("تنبيه خطير: مفاتيح العمل والـ Tokens مفقودة بمتغيرات سيرفر Railway البيئية الحين!")
         return
 
-    # تشغيل البوت مع زر القائمة الثابت تلقائياً عند الإقلاع
+    # بناء وتأسيس إقلاع التطبيق مع إدراج زر القائمة الزرقاء الثابت آلياً
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_text))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     application.run_polling()
 

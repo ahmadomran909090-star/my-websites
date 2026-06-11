@@ -1,4 +1,4 @@
 python-telegram-bot[job-queue]==21.10
-google-genai
-pypdf
-pydantic
+google-genai==0.1.1
+pypdf==4.2.0
+pydantic==2.7.1

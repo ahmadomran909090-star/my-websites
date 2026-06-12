@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python, 3
 # -*- coding: utf-8 -*-
 
 """
@@ -44,14 +44,14 @@ from telegram import (
     MenuButtonCommands,
     WebAppInfo
 )
+import asyncio
 from telegram.ext import (
     Application, 
     CommandHandler, 
     CallbackQueryHandler, 
     MessageHandler, 
     filters, 
-    ContextTypes,
-    JobQueue
+    ContextTypes
 )
 
 # استيراد عميل Google GenAI المطور
@@ -63,7 +63,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("bot_execution_core.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger(__name__)
@@ -655,18 +656,13 @@ async def main_callback_query_router(update: Update, context: ContextTypes.DEFAU
         )
 
     elif data_payload == "pomo_action_start":
-        # تشغيل المؤقت الحقيقي بإضافة عمل لطابور المهام ينتهي بعد 1500 ثانية (25 دقيقة)
-        # للتجارب والاختبارات السريعة يمكن تعديل القيمة لـ 10 ثوانٍ مثلاً
-        context.job_queue.run_once(
-            pomodoro_expiration_callback, 
-            when=1500, 
-            user_id=user_id, 
-            data={"pomo_lang": lang}
-        )
         await query.edit_message_text(
             text=LANG_DICT[lang]["pomo_started"],
             reply_markup=back_to_main_button(lang),
             parse_mode="HTML"
+        )
+        asyncio.get_event_loop().create_task(
+            pomodoro_expiration_callback(user_id, lang, context)
         )
 
     # 11. قسم سينما ومسلسلات وأفلام التكنولوجيا والـ Streaming
@@ -717,23 +713,17 @@ async def main_callback_query_router(update: Update, context: ContextTypes.DEFAU
         context.user_data['action'] = 'state_waiting_for_link_saver_url'
         await query.edit_message_text(text=LANG_DICT[lang]["link_saver_prompt"], parse_mode="HTML")
 
-async def pomodoro_expiration_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يتم استدعاؤها برمجياً فور اكتمال وقت مؤقت البومودورو المجدول لإخطار العميل بنجاح."""
-    target_job = context.job
-    if not target_job or not target_job.user_id:
-        return
-        
-    session_data = target_job.data
-    lang_token = session_data.get("pomo_lang", "en")
+async def pomodoro_expiration_callback(user_id: int, lang_token: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ينتظر 25 دقيقة ثم يرسل إشعار انتهاء البومودورو للمستخدم."""
+    await asyncio.sleep(1500)
     alert_message = LANG_DICT[lang_token]["pomo_done"]
-    
     try:
         await context.bot.send_message(
-            chat_id=target_job.user_id,
+            chat_id=user_id,
             text=alert_message,
             parse_mode="HTML"
         )
-        logger.info(f"🔔 Pomodoro alarm dispatched successfully to target client ID: {target_job.user_id}")
+        logger.info(f"🔔 Pomodoro alarm dispatched successfully to target client ID: {user_id}")
     except Exception as dispatch_err:
         logger.error(f"Could not dispatch async pomodoro notification message row: {dispatch_err}")
 
@@ -1003,7 +993,7 @@ async def document_upload_quiz_handler(update: Update, context: ContextTypes.DEF
         await waiting_ui.edit_text(text="⚠️ <b>Format Refusal:</b> The academic pipeline only processes structural <code>.pdf</code> extensions. Try raw text copy-pasting instead.", reply_markup=main_menu_keyboard(lang), parse_mode="HTML")
         return
 
-    local_temporary_pdf_path = f"/tmp/temp_runtime_file_{user_id}_{random.randint(1000, 9999)}.pdf"
+    local_temporary_pdf_path = f"temp_runtime_file_{user_id}_{random.randint(1000, 9999)}.pdf"
     
     try:
         # تحميل الملف الثنائي برمجياً إلى القرص المحلي للبوت
@@ -1098,6 +1088,7 @@ def execute_platform_runtime_init() -> None:
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .post_init(application_post_init)
+        .updater(None)
         .build()
     )
     

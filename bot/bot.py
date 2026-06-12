@@ -1,4 +1,4 @@
-#!/usr/bin/env python, 3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -63,8 +63,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot_execution_core.log", encoding="utf-8")
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -1004,7 +1003,7 @@ async def document_upload_quiz_handler(update: Update, context: ContextTypes.DEF
         await waiting_ui.edit_text(text="⚠️ <b>Format Refusal:</b> The academic pipeline only processes structural <code>.pdf</code> extensions. Try raw text copy-pasting instead.", reply_markup=main_menu_keyboard(lang), parse_mode="HTML")
         return
 
-    local_temporary_pdf_path = f"temp_runtime_file_{user_id}_{random.randint(1000, 9999)}.pdf"
+    local_temporary_pdf_path = f"/tmp/temp_runtime_file_{user_id}_{random.randint(1000, 9999)}.pdf"
     
     try:
         # تحميل الملف الثنائي برمجياً إلى القرص المحلي للبوت
@@ -1119,5 +1118,4 @@ def execute_platform_runtime_init() -> None:
     platform_application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    # حماية الدخول وبدء التنفيذ الصارم لنواة النظام
     execute_platform_runtime_init()
